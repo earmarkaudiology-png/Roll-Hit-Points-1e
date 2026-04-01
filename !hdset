@@ -15,8 +15,8 @@
 // Writes:
 //   Bar 1 = HP (value and max)
 //   Bar 2 = AC (value only)
-//   Bar 3 = Movement (value only)
-//   Morale attribute = monstermorale (or morale if monstermorale does not exist)
+//   Bar 3 = Movement (value only, full text)
+//   Morale = updates morale_base, morale, and monstermorale
 //
 // AC / Movement behavior:
 //   - If override attribute has a value, use it
@@ -24,10 +24,9 @@
 //   - Otherwise fill from the base sheet attribute
 //
 // Morale rule:
-//   50 base
-//   +5% per full HD above 1
-//   +1% per HP above baseline HP for that HD
-//   + morale_base after calculation
+//   - Base 50%
+//   - +5% per full HD above 1
+//   - Cap at 100%
 //
 // Fractional HD:
 //   1/2 -> 1d4
@@ -49,8 +48,8 @@ on('ready', function () {
     var ATTR_MOVE_OVERRIDE = 'movement_override';
 
     var ATTR_MORALE_BASE = 'morale_base';
-    var ATTR_MORALE_PRIMARY = 'monstermorale';
-    var ATTR_MORALE_FALLBACK = 'morale';
+    var ATTR_MORALE = 'morale';
+    var ATTR_MONSTER_MORALE = 'monstermorale';
 
     function whisperGM(text) {
         sendChat(SCRIPT_NAME, '/w gm ' + text);
@@ -91,24 +90,40 @@ on('ready', function () {
         })[0];
     }
 
-    function setMoraleAttribute(characterId, value) {
-        var attr =
-            findAttribute(characterId, ATTR_MORALE_PRIMARY) ||
-            findAttribute(characterId, ATTR_MORALE_FALLBACK);
+    function getOrCreateAttribute(characterId, attrName, currentValue, maxValue) {
+        var attr = findAttribute(characterId, attrName);
 
         if (!attr) {
             attr = createObj('attribute', {
                 characterid: characterId,
-                name: ATTR_MORALE_PRIMARY,
-                current: value,
-                max: value
-            });
-        } else {
-            attr.set({
-                current: value,
-                max: value
+                name: attrName,
+                current: currentValue,
+                max: maxValue
             });
         }
+
+        return attr;
+    }
+
+    function setMoraleAttributes(characterId, value) {
+        var moraleBaseAttr = getOrCreateAttribute(characterId, ATTR_MORALE_BASE, value, value);
+        var moraleAttr = getOrCreateAttribute(characterId, ATTR_MORALE, value, value);
+        var monsterMoraleAttr = getOrCreateAttribute(characterId, ATTR_MONSTER_MORALE, value, value);
+
+        moraleBaseAttr.set({
+            current: value,
+            max: value
+        });
+
+        moraleAttr.set({
+            current: value,
+            max: value
+        });
+
+        monsterMoraleAttr.set({
+            current: value,
+            max: value
+        });
     }
 
     function parseMonsterHD(hdRaw, bonusRaw) {
@@ -127,8 +142,7 @@ on('ready', function () {
                 dice: dice,
                 bonus: sheetBonus,
                 label: dice + 'd8' + formatBonus(sheetBonus),
-                fullHD: dice,
-                baselineHP: Math.max(1, dice)
+                fullHD: dice
             };
         }
 
@@ -143,8 +157,7 @@ on('ready', function () {
                 dice: dice,
                 bonus: totalBonus,
                 label: dice + 'd8' + formatBonus(totalBonus),
-                fullHD: dice,
-                baselineHP: Math.max(1, dice)
+                fullHD: dice
             };
         }
 
@@ -154,8 +167,7 @@ on('ready', function () {
                 die: 4,
                 bonus: sheetBonus,
                 label: '1d4' + formatBonus(sheetBonus),
-                fullHD: 0,
-                baselineHP: 1
+                fullHD: 0
             };
         }
 
@@ -165,8 +177,7 @@ on('ready', function () {
                 die: 2,
                 bonus: sheetBonus,
                 label: '1d2' + formatBonus(sheetBonus),
-                fullHD: 0,
-                baselineHP: 1
+                fullHD: 0
             };
         }
 
@@ -200,20 +211,12 @@ on('ready', function () {
         };
     }
 
-    function calculateMorale(parsedHD, rolledTotal, moraleBase) {
+    function calculateBaseMorale(parsedHD) {
         var morale = 50;
-        var extraHP;
 
         if (parsedHD.fullHD > 1) {
             morale += (parsedHD.fullHD - 1) * 5;
         }
-
-        extraHP = rolledTotal - parsedHD.baselineHP;
-        if (extraHP > 0) {
-            morale += extraHP;
-        }
-
-        morale += moraleBase;
 
         return clamp(morale, 1, 100);
     }
@@ -242,7 +245,7 @@ on('ready', function () {
 
     on('chat:message', function (msg) {
         var i, sel, token, tokenName, charId;
-        var hdRaw, bonusRaw, moraleBaseRaw;
+        var hdRaw, bonusRaw;
         var acValue, moveValue;
         var parsedHD, rolled, moraleValue;
         var updateObj;
@@ -278,7 +281,6 @@ on('ready', function () {
 
             hdRaw = getAttrByName(charId, ATTR_HD);
             bonusRaw = getAttrByName(charId, ATTR_HD_BONUS);
-            moraleBaseRaw = getAttrByName(charId, ATTR_MORALE_BASE);
 
             acValue = chooseACValue(charId, token);
             moveValue = chooseMoveValue(charId, token);
@@ -300,8 +302,8 @@ on('ready', function () {
                 continue;
             }
 
-            moraleValue = calculateMorale(parsedHD, rolled.total, toInt(moraleBaseRaw, 0));
-            setMoraleAttribute(charId, moraleValue);
+            moraleValue = calculateBaseMorale(parsedHD);
+            setMoraleAttributes(charId, moraleValue);
 
             updateObj = {
                 bar1_value: rolled.total,
