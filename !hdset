@@ -14,9 +14,14 @@
 //
 // Writes:
 //   Bar 1 = HP (value and max)
-//   Bar 2 = AC (value only, full text, override if present)
-//   Bar 3 = Movement (value only, full text, override if present)
+//   Bar 2 = AC (value only)
+//   Bar 3 = Movement (value only)
 //   Morale attribute = monstermorale (or morale if monstermorale does not exist)
+//
+// AC / Movement behavior:
+//   - If override attribute has a value, use it
+//   - Otherwise preserve the token's existing bar value if present
+//   - Otherwise fill from the base sheet attribute
 //
 // Morale rule:
 //   50 base
@@ -104,15 +109,6 @@ on('ready', function () {
                 max: value
             });
         }
-    }
-
-    function pickOverrideOrBase(characterId, overrideName, baseName) {
-        var overrideValue = getAttrByName(characterId, overrideName);
-        var baseValue = getAttrByName(characterId, baseName);
-
-        if (hasText(overrideValue)) return String(overrideValue);
-        if (hasText(baseValue)) return String(baseValue);
-        return '';
     }
 
     function parseMonsterHD(hdRaw, bonusRaw) {
@@ -222,6 +218,28 @@ on('ready', function () {
         return clamp(morale, 1, 100);
     }
 
+    function chooseACValue(charId, token) {
+        var overrideValue = getAttrByName(charId, ATTR_AC_OVERRIDE);
+        var baseValue = getAttrByName(charId, ATTR_AC);
+        var tokenValue = token.get('bar2_value');
+
+        if (hasText(overrideValue)) return String(overrideValue);
+        if (hasText(tokenValue)) return String(tokenValue);
+        if (hasText(baseValue)) return String(baseValue);
+        return '';
+    }
+
+    function chooseMoveValue(charId, token) {
+        var overrideValue = getAttrByName(charId, ATTR_MOVE_OVERRIDE);
+        var baseValue = getAttrByName(charId, ATTR_MOVE);
+        var tokenValue = token.get('bar3_value');
+
+        if (hasText(overrideValue)) return String(overrideValue);
+        if (hasText(tokenValue)) return String(tokenValue);
+        if (hasText(baseValue)) return String(baseValue);
+        return '';
+    }
+
     on('chat:message', function (msg) {
         var i, sel, token, tokenName, charId;
         var hdRaw, bonusRaw, moraleBaseRaw;
@@ -262,8 +280,8 @@ on('ready', function () {
             bonusRaw = getAttrByName(charId, ATTR_HD_BONUS);
             moraleBaseRaw = getAttrByName(charId, ATTR_MORALE_BASE);
 
-            acValue = pickOverrideOrBase(charId, ATTR_AC_OVERRIDE, ATTR_AC);
-            moveValue = pickOverrideOrBase(charId, ATTR_MOVE_OVERRIDE, ATTR_MOVE);
+            acValue = chooseACValue(charId, token);
+            moveValue = chooseMoveValue(charId, token);
 
             parsedHD = parseMonsterHD(hdRaw, bonusRaw);
 
