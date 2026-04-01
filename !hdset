@@ -10,7 +10,7 @@
 //   armorclass_override
 //   movement
 //   movement_override
-//   moral_base
+//   morale_base
 //
 // Writes:
 //   Bar 1 = HP (value and max)
@@ -22,7 +22,7 @@
 //   50 base
 //   +5% per full HD above 1
 //   +1% per HP above baseline HP for that HD
-//   + moral_base after calculation
+//   + morale_base after calculation
 //
 // Fractional HD:
 //   1/2 -> 1d4
@@ -43,7 +43,7 @@ on('ready', function () {
     var ATTR_MOVE = 'movement';
     var ATTR_MOVE_OVERRIDE = 'movement_override';
 
-    var ATTR_MORALE_BASE = 'moral_base';
+    var ATTR_MORALE_BASE = 'morale_base';
     var ATTR_MORALE_PRIMARY = 'monstermorale';
     var ATTR_MORALE_FALLBACK = 'morale';
 
@@ -204,7 +204,7 @@ on('ready', function () {
         };
     }
 
-    function calculateMorale(parsedHD, rolledTotal, moralBase) {
+    function calculateMorale(parsedHD, rolledTotal, moraleBase) {
         var morale = 50;
         var extraHP;
 
@@ -217,14 +217,14 @@ on('ready', function () {
             morale += extraHP;
         }
 
-        morale += moralBase;
+        morale += moraleBase;
 
         return clamp(morale, 1, 100);
     }
 
     on('chat:message', function (msg) {
         var i, sel, token, tokenName, charId;
-        var hdRaw, bonusRaw, moralBaseRaw;
+        var hdRaw, bonusRaw, moraleBaseRaw;
         var acValue, moveValue;
         var parsedHD, rolled, moraleValue;
         var updateObj;
@@ -260,7 +260,7 @@ on('ready', function () {
 
             hdRaw = getAttrByName(charId, ATTR_HD);
             bonusRaw = getAttrByName(charId, ATTR_HD_BONUS);
-            moralBaseRaw = getAttrByName(charId, ATTR_MORALE_BASE);
+            moraleBaseRaw = getAttrByName(charId, ATTR_MORALE_BASE);
 
             acValue = pickOverrideOrBase(charId, ATTR_AC_OVERRIDE, ATTR_AC);
             moveValue = pickOverrideOrBase(charId, ATTR_MOVE_OVERRIDE, ATTR_MOVE);
@@ -282,7 +282,7 @@ on('ready', function () {
                 continue;
             }
 
-            moraleValue = calculateMorale(parsedHD, rolled.total, toInt(moralBaseRaw, 0));
+            moraleValue = calculateMorale(parsedHD, rolled.total, toInt(moraleBaseRaw, 0));
             setMoraleAttribute(charId, moraleValue);
 
             updateObj = {
