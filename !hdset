@@ -1,0 +1,169 @@
+// Roll20 Mod Script: Roll HP from character sheet monsterhd and monsterhd_bonus
+// Command:
+//   !hdset
+//
+// Behavior:
+// - Reads monsterhd and monsterhd_bonus from the represented character
+// - Rolls monsterhd d8 + monsterhd_bonus
+// - ALWAYS overwrites Bar 1 value and max
+
+(function () {
+    'use strict';
+
+    var SCRIPT_NAME = 'SheetHDSet';
+    var COMMAND = '!hdset';
+
+    function htmlEscape(str) {
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function whisperGM(text) {
+        sendChat(SCRIPT_NAME, '/w gm ' + text);
+    }
+
+    function toInt(value, fallback) {
+        var n = parseInt(value, 10);
+        return isNaN(n) ? fallback : n;
+    }
+
+    function rollHDTotal(hdCount, bonus) {
+        var rolls = [];
+        var total = bonus;
+        var i, r;
+
+        for (i = 0; i < hdCount; i++) {
+            r = randomInteger(8);
+            rolls.push(r);
+            total += r;
+        }
+
+        return {
+            total: total,
+            rolls: rolls
+        };
+    }
+
+    on('chat:message', function (msg) {
+        var results, errors, i, sel, token, tokenName, charId;
+        var hdRaw, bonusRaw, hdCount, bonus, rolled;
+        var output, lines, formula, detail;
+
+        if (msg.type !== 'api') {
+            return;
+        }
+
+        if (msg.content.toLowerCase() !== COMMAND) {
+            return;
+        }
+
+        if (!msg.selected || !msg.selected.length) {
+            whisperGM('No tokens selected.');
+            return;
+        }
+
+        results = [];
+        errors = [];
+
+        for (i = 0; i < msg.selected.length; i++) {
+            sel = msg.selected[i];
+
+            if (sel._type !== 'graphic') {
+                continue;
+            }
+
+            token = getObj('graphic', sel._id);
+            if (!token) {
+                continue;
+            }
+
+            tokenName = token.get('name') || ('Token ' + sel._id);
+            charId = token.get('represents');
+
+            if (!charId) {
+                errors.push('<b>' + htmlEscape(tokenName) + '</b>: token does not represent a character.');
+                continue;
+            }
+
+            hdRaw = getAttrByName(charId, 'monsterhd');
+            bonusRaw = getAttrByName(charId, 'monsterhd_bonus');
+
+            hdCount = toInt(hdRaw, NaN);
+            bonus = toInt(bonusRaw, 0);
+
+            if (isNaN(hdCount) || hdCount < 1) {
+                errors.push(
+                    '<b>' + htmlEscape(tokenName) + '</b>: invalid monsterhd value ' +
+                    '(<code>' + htmlEscape(hdRaw) + '</code>).'
+                );
+                continue;
+            }
+
+            rolled = rollHDTotal(hdCount, bonus);
+
+            token.set('bar1_value', rolled.total);
+            token.set('bar1_max', rolled.total);
+
+            results.push({
+                name: tokenName,
+                hdCount: hdCount,
+                bonus: bonus,
+                total: rolled.total,
+                rolls: rolled.rolls
+            });
+        }
+
+        if (!results.length && !errors.length) {
+            whisperGM('No valid tokens were processed.');
+            return;
+        }
+
+        output = '';
+
+        if (results.length) {
+            lines = [];
+            output += '<b>HD Rolls Applied to Bar 1</b><br>';
+
+            for (i = 0; i < results.length; i++) {
+                formula = results[i].hdCount + 'd8';
+                if (results[i].bonus > 0) {
+                    formula += '+' + results[i].bonus;
+                } else if (results[i].bonus < 0) {
+                    formula += results[i].bonus;
+                }
+
+                detail = results[i].rolls.join(' + ');
+                if (results[i].bonus > 0) {
+                    detail += ' + ' + results[i].bonus;
+                } else if (results[i].bonus < 0) {
+                    detail += ' - ' + Math.abs(results[i].bonus);
+                }
+
+                lines.push(
+                    '<b>' + htmlEscape(results[i].name) + '</b>: ' +
+                    results[i].total + ' (<code>' + htmlEscape(formula) +
+                    '</code> = <code>' + detail + '</code>)'
+                );
+            }
+
+            output += lines.join('<br>');
+        }
+
+        if (errors.length) {
+            if (output) {
+                output += '<br><br>';
+            }
+            output += '<b>Errors</b><br>' + errors.join('<br>');
+        }
+
+        whisperGM(output);
+    });
+
+    on('ready', function () {
+        log(SCRIPT_NAME + ' ready. Use !hdset');
+    });
+}());
