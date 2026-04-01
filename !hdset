@@ -1,121 +1,195 @@
-// Roll20 Mod Script: Roll HP from character sheet monsterhd and monsterhd_bonus
+// Roll20 Mod Script: HD Set
 //
 // Command:
-//   !hd
+//   !hdset
 //
-// Behavior:
-// - Reads monsterhd and monsterhd_bonus from the represented character
-// - Rolls HP
-// - ALWAYS overwrites Bar 1 value and Bar 1 max
+// Uses sheet attributes:
+//   monsterhd
+//   monsterhd_bonus
+//   armorclass
+//   armorclass_override
+//   movement
+//   movement_override
+//   moral_base
 //
-// Supported monsterhd formats:
-//   4      => 4d8
-//   HD4    => 4d8
-//   2+1    => 2d8+1
-//   HD2+1  => 2d8+1
-//   1-1    => 1d8-1 (minimum 1 total hp)
-//   1/2    => 1d4
-//   1/4    => 1d2   (house rule)
+// Writes:
+//   Bar 1 = HP (value and max)
+//   Bar 2 = AC (value only, full text, override if present)
+//   Bar 3 = Movement (value only, full text, override if present)
+//   Morale attribute = monstermorale (or morale if monstermorale does not exist)
+//
+// Morale rule:
+//   50 base
+//   +5% per full HD above 1
+//   +1% per HP above baseline HP for that HD
+//   + moral_base after calculation
+//
+// Fractional HD:
+//   1/2 -> 1d4
+//   1/4 -> 1d2 (house rule)
 
-(() => {
+on('ready', function () {
     'use strict';
 
-    const SCRIPT_NAME = 'SheetHD';
-    const COMMAND = '!hd';
+    var SCRIPT_NAME = 'HDSet';
+    var COMMAND = '!hdset';
 
-    const htmlEscape = (str) => {
+    var ATTR_HD = 'monsterhd';
+    var ATTR_HD_BONUS = 'monsterhd_bonus';
+
+    var ATTR_AC = 'armorclass';
+    var ATTR_AC_OVERRIDE = 'armorclass_override';
+
+    var ATTR_MOVE = 'movement';
+    var ATTR_MOVE_OVERRIDE = 'movement_override';
+
+    var ATTR_MORALE_BASE = 'moral_base';
+    var ATTR_MORALE_PRIMARY = 'monstermorale';
+    var ATTR_MORALE_FALLBACK = 'morale';
+
+    function whisperGM(text) {
+        sendChat(SCRIPT_NAME, '/w gm ' + text);
+    }
+
+    function escapeHtml(str) {
         return String(str)
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
-    };
+    }
 
-    const whisperGM = (text) => {
-        sendChat(SCRIPT_NAME, '/w gm ' + text);
-    };
+    function hasText(value) {
+        return value !== undefined && value !== null && String(value).trim() !== '';
+    }
 
-    const toInt = (value, fallback) => {
-        const n = parseInt(value, 10);
+    function toInt(value, fallback) {
+        var n = parseInt(value, 10);
         return isNaN(n) ? fallback : n;
-    };
+    }
 
-    const formatBonus = (n) => {
+    function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    function formatBonus(n) {
         if (!n) return '';
         return (n > 0 ? '+' : '') + n;
-    };
+    }
 
-    const parseMonsterHD = (hdRaw, bonusRaw) => {
-        let hdText = String(hdRaw || '').replace(/\s+/g, '').toLowerCase();
-        const sheetBonus = toInt(bonusRaw, 0);
+    function findAttribute(characterId, attrName) {
+        return findObjs({
+            type: 'attribute',
+            characterid: characterId,
+            name: attrName
+        })[0];
+    }
+
+    function setMoraleAttribute(characterId, value) {
+        var attr =
+            findAttribute(characterId, ATTR_MORALE_PRIMARY) ||
+            findAttribute(characterId, ATTR_MORALE_FALLBACK);
+
+        if (!attr) {
+            attr = createObj('attribute', {
+                characterid: characterId,
+                name: ATTR_MORALE_PRIMARY,
+                current: value,
+                max: value
+            });
+        } else {
+            attr.set({
+                current: value,
+                max: value
+            });
+        }
+    }
+
+    function pickOverrideOrBase(characterId, overrideName, baseName) {
+        var overrideValue = getAttrByName(characterId, overrideName);
+        var baseValue = getAttrByName(characterId, baseName);
+
+        if (hasText(overrideValue)) return String(overrideValue);
+        if (hasText(baseValue)) return String(baseValue);
+        return '';
+    }
+
+    function parseMonsterHD(hdRaw, bonusRaw) {
+        var hdText = String(hdRaw || '').replace(/\s+/g, '').toLowerCase();
+        var sheetBonus = toInt(bonusRaw, 0);
+        var m, dice, inlineBonus, totalBonus;
 
         if (!hdText) return null;
 
-        // Allow optional HD prefix
         hdText = hdText.replace(/^hd/, '');
 
-        // Plain integer: 4 => 4d8
         if (/^\d+$/.test(hdText)) {
-            const dice = parseInt(hdText, 10);
+            dice = parseInt(hdText, 10);
             return {
                 type: 'normal',
                 dice: dice,
                 bonus: sheetBonus,
-                label: dice + 'd8' + formatBonus(sheetBonus)
+                label: dice + 'd8' + formatBonus(sheetBonus),
+                fullHD: dice,
+                baselineHP: Math.max(1, dice)
             };
         }
 
-        // X+Y or X-Y: 2+1, 1-1, 3-2
-        let m = hdText.match(/^(\d+)([+-]\d+)$/);
+        m = hdText.match(/^(\d+)([+-]\d+)$/);
         if (m) {
-            const dice = parseInt(m[1], 10);
-            const baseBonus = parseInt(m[2], 10);
-            const totalBonus = baseBonus + sheetBonus;
+            dice = parseInt(m[1], 10);
+            inlineBonus = parseInt(m[2], 10);
+            totalBonus = inlineBonus + sheetBonus;
 
             return {
                 type: 'normal',
                 dice: dice,
                 bonus: totalBonus,
-                label: dice + 'd8' + formatBonus(totalBonus)
+                label: dice + 'd8' + formatBonus(totalBonus),
+                fullHD: dice,
+                baselineHP: Math.max(1, dice)
             };
         }
 
-        // Fractional HD
         if (hdText === '1/2') {
             return {
                 type: 'fraction',
                 die: 4,
                 bonus: sheetBonus,
-                label: '1d4' + formatBonus(sheetBonus)
+                label: '1d4' + formatBonus(sheetBonus),
+                fullHD: 0,
+                baselineHP: 1
             };
         }
 
-        // House rule for 1/4 HD
         if (hdText === '1/4') {
             return {
                 type: 'fraction',
                 die: 2,
                 bonus: sheetBonus,
-                label: '1d2' + formatBonus(sheetBonus)
+                label: '1d2' + formatBonus(sheetBonus),
+                fullHD: 0,
+                baselineHP: 1
             };
         }
 
         return null;
-    };
+    }
 
-    const rollParsedHD = (parsed) => {
-        let total = parsed.bonus || 0;
-        const rolls = [];
+    function rollParsedHD(parsed) {
+        var total = parsed.bonus || 0;
+        var rolls = [];
+        var i, r;
 
         if (parsed.type === 'normal') {
-            for (let i = 0; i < parsed.dice; i++) {
-                const r = randomInteger(8);
+            for (i = 0; i < parsed.dice; i++) {
+                r = randomInteger(8);
                 rolls.push(r);
                 total += r;
             }
         } else if (parsed.type === 'fraction') {
-            const r = randomInteger(parsed.die);
+            r = randomInteger(parsed.die);
             rolls.push(r);
             total += r;
         } else {
@@ -128,99 +202,109 @@
             total: total,
             rolls: rolls
         };
-    };
+    }
 
-    on('chat:message', (msg) => {
+    function calculateMorale(parsedHD, rolledTotal, moralBase) {
+        var morale = 50;
+        var extraHP;
+
+        if (parsedHD.fullHD > 1) {
+            morale += (parsedHD.fullHD - 1) * 5;
+        }
+
+        extraHP = rolledTotal - parsedHD.baselineHP;
+        if (extraHP > 0) {
+            morale += extraHP;
+        }
+
+        morale += moralBase;
+
+        return clamp(morale, 1, 100);
+    }
+
+    on('chat:message', function (msg) {
+        var i, sel, token, tokenName, charId;
+        var hdRaw, bonusRaw, moralBaseRaw;
+        var acValue, moveValue;
+        var parsedHD, rolled, moraleValue;
+        var updateObj;
+        var errors = [];
+
         if (msg.type !== 'api') return;
         if (!msg.content) return;
-        if (msg.content.trim().toLowerCase() !== COMMAND) return;
+        if (String(msg.content).trim().toLowerCase() !== COMMAND) return;
 
         if (!msg.selected || !msg.selected.length) {
             whisperGM('No tokens selected.');
             return;
         }
 
-        const results = [];
-        const errors = [];
+        for (i = 0; i < msg.selected.length; i++) {
+            sel = msg.selected[i];
 
-        msg.selected.forEach((sel) => {
-            if (sel._type !== 'graphic') return;
+            if (sel._type !== 'graphic') continue;
 
-            const token = getObj('graphic', sel._id);
-            if (!token) return;
-
-            const tokenName = token.get('name') || ('Token ' + sel._id);
-            const charId = token.get('represents');
-
-            if (!charId) {
-                errors.push('<b>' + htmlEscape(tokenName) + '</b>: token does not represent a character.');
-                return;
+            token = getObj('graphic', sel._id);
+            if (!token) {
+                errors.push('Selected object ' + sel._id + ' could not be read as a token.');
+                continue;
             }
 
-            const hdRaw = getAttrByName(charId, 'monsterhd');
-            const bonusRaw = getAttrByName(charId, 'monsterhd_bonus');
-            const parsedHD = parseMonsterHD(hdRaw, bonusRaw);
+            tokenName = token.get('name') || ('Token ' + sel._id);
+            charId = token.get('represents');
+
+            if (!charId) {
+                errors.push('<b>' + escapeHtml(tokenName) + '</b>: no represented character.');
+                continue;
+            }
+
+            hdRaw = getAttrByName(charId, ATTR_HD);
+            bonusRaw = getAttrByName(charId, ATTR_HD_BONUS);
+            moralBaseRaw = getAttrByName(charId, ATTR_MORALE_BASE);
+
+            acValue = pickOverrideOrBase(charId, ATTR_AC_OVERRIDE, ATTR_AC);
+            moveValue = pickOverrideOrBase(charId, ATTR_MOVE_OVERRIDE, ATTR_MOVE);
+
+            parsedHD = parseMonsterHD(hdRaw, bonusRaw);
 
             if (!parsedHD) {
                 errors.push(
-                    '<b>' + htmlEscape(tokenName) + '</b>: invalid monsterhd value ' +
-                    '(<code>' + htmlEscape(hdRaw) + '</code>). Supported: ' +
-                    '<code>4</code>, <code>HD4</code>, <code>2+1</code>, <code>HD2+1</code>, ' +
-                    '<code>1-1</code>, <code>1/2</code>, <code>1/4</code>.'
+                    '<b>' + escapeHtml(tokenName) + '</b>: bad HD. ' +
+                    'monsterhd=<code>' + escapeHtml(hdRaw) + '</code>, ' +
+                    'monsterhd_bonus=<code>' + escapeHtml(bonusRaw) + '</code>'
                 );
-                return;
+                continue;
             }
 
-            const rolled = rollParsedHD(parsedHD);
-
+            rolled = rollParsedHD(parsedHD);
             if (!rolled) {
-                errors.push('<b>' + htmlEscape(tokenName) + '</b>: could not roll HD.');
-                return;
+                errors.push('<b>' + escapeHtml(tokenName) + '</b>: roll failed.');
+                continue;
             }
 
-            // Always overwrite Bar 1
-            token.set({
+            moraleValue = calculateMorale(parsedHD, rolled.total, toInt(moralBaseRaw, 0));
+            setMoraleAttribute(charId, moraleValue);
+
+            updateObj = {
                 bar1_value: rolled.total,
                 bar1_max: rolled.total
-            });
+            };
 
-            let detail = rolled.rolls.join(' + ');
-            if (parsedHD.bonus > 0) detail += ' + ' + parsedHD.bonus;
-            if (parsedHD.bonus < 0) detail += ' - ' + Math.abs(parsedHD.bonus);
+            if (hasText(acValue)) {
+                updateObj.bar2_value = acValue;
+            }
 
-            results.push({
-                name: tokenName,
-                total: rolled.total,
-                formula: parsedHD.label,
-                detail: detail
-            });
-        });
+            if (hasText(moveValue)) {
+                updateObj.bar3_value = moveValue;
+            }
 
-        if (!results.length && !errors.length) {
-            whisperGM('No valid tokens were processed.');
-            return;
-        }
-
-        let output = '';
-
-        if (results.length) {
-            output += '<b>HD Rolls Applied to Bar 1</b><br>';
-            output += results.map((r) => {
-                return '<b>' + htmlEscape(r.name) + '</b>: ' +
-                    r.total + ' (<code>' + htmlEscape(r.formula) + '</code> = <code>' +
-                    htmlEscape(r.detail) + '</code>)';
-            }).join('<br>');
+            token.set(updateObj);
         }
 
         if (errors.length) {
-            if (output) output += '<br><br>';
-            output += '<b>Errors</b><br>' + errors.join('<br>');
+            whisperGM('<b>Errors</b><br>' + errors.join('<br>'));
         }
-
-        whisperGM(output);
     });
 
-    on('ready', () => {
-        log(SCRIPT_NAME + ' ready. Use !hd');
-    });
-})();
+    log(SCRIPT_NAME + ' ready. Use !hdset');
+});
