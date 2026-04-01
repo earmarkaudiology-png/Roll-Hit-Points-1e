@@ -1,11 +1,23 @@
-// Roll20 Mod Script: Roll HP from character sheet monsterhd and monsterhd_bonus
+// Roll20 Mod Script: Roll HP from character sheet monsterhd and monsterhd_bonus,
+// calculate morale_base, copy armorclass to Bar 2, and copy movement to Bar 3.
+//
 // Command:
 //   !hdset
 //
-// Behavior:
+// Behavior per selected token:
 // - Reads monsterhd and monsterhd_bonus from the represented character
 // - Rolls monsterhd d8 + monsterhd_bonus
-// - ALWAYS overwrites Bar 1 value and max
+// - Sets Bar 1 value and max to the new HP result
+// - Calculates morale_base as:
+//      50% base
+//      +5% per HD above 1
+//      +1% per positive HP bonus above hit dice
+//      capped at 100%
+// - Writes morale_base to the represented character sheet
+// - Copies armorclass to Bar 2 (no calculation)
+// - Copies movement to Bar 3 (no calculation)
+// - If armorclass or movement is blank/missing, leaves that bar blank
+// - Skips incomplete sheet data silently
 
 (function () {
     'use strict';
@@ -31,6 +43,13 @@
         return isNaN(n) ? fallback : n;
     }
 
+    function cleanValue(value) {
+        if (value === undefined || value === null) {
+            return '';
+        }
+        return String(value).replace(/^\s+|\s+$/g, '');
+    }
+
     function rollHDTotal(hdCount, bonus) {
         var rolls = [];
         var total = bonus;
@@ -48,10 +67,46 @@
         };
     }
 
+    function getOrCreateAttr(charId, attrName) {
+        var attrs = findObjs({
+            _type: 'attribute',
+            _characterid: charId,
+            name: attrName
+        });
+
+        if (attrs && attrs.length) {
+            return attrs[0];
+        }
+
+        return createObj('attribute', {
+            characterid: charId,
+            name: attrName,
+            current: ''
+        });
+    }
+
+    function calculateMorale(hdCount, bonus) {
+        var morale = 50;
+        var extraHpAboveHd = (bonus > 0) ? bonus : 0;
+
+        morale += Math.max(hdCount - 1, 0) * 5;
+        morale += extraHpAboveHd;
+
+        if (morale > 100) {
+            morale = 100;
+        }
+
+        if (morale < 0) {
+            morale = 0;
+        }
+
+        return morale;
+    }
+
     on('chat:message', function (msg) {
-        var results, errors, i, sel, token, tokenName, charId;
-        var hdRaw, bonusRaw, hdCount, bonus, rolled;
-        var output, lines, formula, detail;
+        var results, i, sel, token, tokenName, charId;
+        var hdRaw, bonusRaw, hdCount, bonus, rolled, morale, moraleAttr;
+        var acRaw, moveRaw, output, lines, formula, detail, updatedAny;
 
         if (msg.type !== 'api') {
             return;
@@ -67,7 +122,7 @@
         }
 
         results = [];
-        errors = [];
+        updatedAny = false;
 
         for (i = 0; i < msg.selected.length; i++) {
             sel = msg.selected[i];
@@ -85,21 +140,27 @@
             charId = token.get('represents');
 
             if (!charId) {
-                errors.push('<b>' + htmlEscape(tokenName) + '</b>: token does not represent a character.');
                 continue;
             }
 
             hdRaw = getAttrByName(charId, 'monsterhd');
             bonusRaw = getAttrByName(charId, 'monsterhd_bonus');
+            acRaw = cleanValue(getAttrByName(charId, 'armorclass'));
+            moveRaw = cleanValue(getAttrByName(charId, 'movement'));
 
             hdCount = toInt(hdRaw, NaN);
             bonus = toInt(bonusRaw, 0);
 
+            // Bar 2: armor class, no calculation
+            token.set('bar2_value', acRaw);
+            token.set('bar2_max', '');
+
+            // Bar 3: movement, no calculation
+            token.set('bar3_value', moveRaw);
+            token.set('bar3_max', '');
+
+            // If HD is not usable, skip HP/morale silently
             if (isNaN(hdCount) || hdCount < 1) {
-                errors.push(
-                    '<b>' + htmlEscape(tokenName) + '</b>: invalid monsterhd value ' +
-                    '(<code>' + htmlEscape(hdRaw) + '</code>).'
-                );
                 continue;
             }
 
@@ -108,58 +169,58 @@
             token.set('bar1_value', rolled.total);
             token.set('bar1_max', rolled.total);
 
+            morale = calculateMorale(hdCount, bonus);
+            moraleAttr = getOrCreateAttr(charId, 'morale_base');
+            moraleAttr.set('current', morale);
+
             results.push({
                 name: tokenName,
                 hdCount: hdCount,
                 bonus: bonus,
                 total: rolled.total,
-                rolls: rolled.rolls
+                rolls: rolled.rolls,
+                morale: morale,
+                ac: acRaw,
+                move: moveRaw
             });
+
+            updatedAny = true;
         }
 
-        if (!results.length && !errors.length) {
-            whisperGM('No valid tokens were processed.');
+        if (!updatedAny) {
+            whisperGM('No tokens were updated.');
             return;
         }
 
-        output = '';
+        output = '<b>Updated selected tokens</b><br>';
+        lines = [];
 
-        if (results.length) {
-            lines = [];
-            output += '<b>HD Rolls Applied to Bar 1</b><br>';
-
-            for (i = 0; i < results.length; i++) {
-                formula = results[i].hdCount + 'd8';
-                if (results[i].bonus > 0) {
-                    formula += '+' + results[i].bonus;
-                } else if (results[i].bonus < 0) {
-                    formula += results[i].bonus;
-                }
-
-                detail = results[i].rolls.join(' + ');
-                if (results[i].bonus > 0) {
-                    detail += ' + ' + results[i].bonus;
-                } else if (results[i].bonus < 0) {
-                    detail += ' - ' + Math.abs(results[i].bonus);
-                }
-
-                lines.push(
-                    '<b>' + htmlEscape(results[i].name) + '</b>: ' +
-                    results[i].total + ' (<code>' + htmlEscape(formula) +
-                    '</code> = <code>' + detail + '</code>)'
-                );
+        for (i = 0; i < results.length; i++) {
+            formula = results[i].hdCount + 'd8';
+            if (results[i].bonus > 0) {
+                formula += '+' + results[i].bonus;
+            } else if (results[i].bonus < 0) {
+                formula += results[i].bonus;
             }
 
-            output += lines.join('<br>');
-        }
-
-        if (errors.length) {
-            if (output) {
-                output += '<br><br>';
+            detail = results[i].rolls.join(' + ');
+            if (results[i].bonus > 0) {
+                detail += ' + ' + results[i].bonus;
+            } else if (results[i].bonus < 0) {
+                detail += ' - ' + Math.abs(results[i].bonus);
             }
-            output += '<b>Errors</b><br>' + errors.join('<br>');
+
+            lines.push(
+                '<b>' + htmlEscape(results[i].name) + '</b>: ' +
+                'HP ' + results[i].total +
+                ' (<code>' + htmlEscape(formula) + '</code> = <code>' + detail + '</code>)' +
+                ' | Morale <b>' + results[i].morale + '%</b>' +
+                ' | AC <b>' + htmlEscape(results[i].ac || '') + '</b>' +
+                ' | Move <b>' + htmlEscape(results[i].move || '') + '</b>'
+            );
         }
 
+        output += lines.join('<br>');
         whisperGM(output);
     });
 
