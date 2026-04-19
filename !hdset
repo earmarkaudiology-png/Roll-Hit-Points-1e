@@ -11,6 +11,8 @@
 //   movement
 //   movement_override
 //   morale_base
+//   no_appearing OR number_appearing
+//   lair OR percent_in_lair
 //
 // Writes:
 //   Bar 1 = HP (value and max)
@@ -18,19 +20,11 @@
 //   Bar 3 = Movement (value only, full text)
 //   Morale = updates morale_base, morale, and monstermorale
 //
-// AC / Movement behavior:
-//   - If override attribute has a value, use it
-//   - Otherwise preserve the token's existing bar value if present
-//   - Otherwise fill from the base sheet attribute
-//
-// Morale rule:
-//   - Base 50%
-//   - +5% per full HD above 1
-//   - Cap at 100%
-//
-// Fractional HD:
-//   1/2 -> 1d4
-//   1/4 -> 1d2 (house rule)
+// Notes:
+//   - Command remains !hdset
+//   - Adds No. Appearing and In Lair rolling/display like the monster manual API
+//   - Does not change token bars for appearing/lair; it reports them to GM chat
+//   - If no_appearing is non-numeric text such as "See nest composition", it will display nothing for that field
 
 on('ready', function () {
     'use strict';
@@ -68,6 +62,10 @@ on('ready', function () {
         return value !== undefined && value !== null && String(value).trim() !== '';
     }
 
+    function trim(value) {
+        return String(value || '').replace(/^\s+|\s+$/g, '');
+    }
+
     function toInt(value, fallback) {
         var n = parseInt(value, 10);
         return isNaN(n) ? fallback : n;
@@ -80,6 +78,10 @@ on('ready', function () {
     function formatBonus(n) {
         if (!n) return '';
         return (n > 0 ? '+' : '') + n;
+    }
+
+    function normalizeDashText(value) {
+        return String(value || '').replace(/[–—−]/g, '-').trim();
     }
 
     function findAttribute(characterId, attrName) {
@@ -105,25 +107,19 @@ on('ready', function () {
         return attr;
     }
 
+    function setAttrWithMax(characterId, attrName, currentValue, maxValue) {
+        var attr = getOrCreateAttribute(characterId, attrName, currentValue, maxValue);
+        attr.set({
+            current: currentValue,
+            max: maxValue
+        });
+        return attr;
+    }
+
     function setMoraleAttributes(characterId, value) {
-        var moraleBaseAttr = getOrCreateAttribute(characterId, ATTR_MORALE_BASE, value, value);
-        var moraleAttr = getOrCreateAttribute(characterId, ATTR_MORALE, value, value);
-        var monsterMoraleAttr = getOrCreateAttribute(characterId, ATTR_MONSTER_MORALE, value, value);
-
-        moraleBaseAttr.set({
-            current: value,
-            max: value
-        });
-
-        moraleAttr.set({
-            current: value,
-            max: value
-        });
-
-        monsterMoraleAttr.set({
-            current: value,
-            max: value
-        });
+        setAttrWithMax(characterId, ATTR_MORALE_BASE, value, value);
+        setAttrWithMax(characterId, ATTR_MORALE, value, value);
+        setAttrWithMax(characterId, ATTR_MONSTER_MORALE, value, value);
     }
 
     function parseMonsterHD(hdRaw, bonusRaw) {
@@ -243,20 +239,86 @@ on('ready', function () {
         return '';
     }
 
+    function rollSimpleRange(textValue) {
+        var t = normalizeDashText(textValue);
+        var m, lo, hi, tmp;
+
+        if (!t) return null;
+        if (/^nil$/i.test(t)) return { label: t, rolled: 0, kind: 'nil' };
+
+        m = t.match(/^(\d+)\s*-\s*(\d+)/);
+        if (m) {
+            lo = parseInt(m[1], 10);
+            hi = parseInt(m[2], 10);
+
+            if (hi < lo) {
+                tmp = lo;
+                lo = hi;
+                hi = tmp;
+            }
+
+            return {
+                label: lo + '-' + hi,
+                rolled: randomInteger(hi - lo + 1) + lo - 1,
+                kind: 'range'
+            };
+        }
+
+        m = t.match(/^(\d+)/);
+        if (m) {
+            return {
+                label: m[1],
+                rolled: parseInt(m[1], 10),
+                kind: 'fixed'
+            };
+        }
+
+        return null;
+    }
+
+    function rollLairChance(textValue) {
+        var t = normalizeDashText(textValue).trim();
+        var m, pct, d100;
+
+        if (!t || /^nil$/i.test(t)) {
+            return {
+                label: '0%',
+                rolled: 0,
+                isInLair: false,
+                kind: 'nil'
+            };
+        }
+
+        m = t.match(/(\d+)\s*%?/);
+        if (!m) return null;
+
+        pct = Math.max(0, Math.min(100, parseInt(m[1], 10)));
+        d100 = randomInteger(100);
+
+        return {
+            label: pct + '%',
+            rolled: d100,
+            isInLair: d100 <= pct,
+            kind: 'percent'
+        };
+    }
+
     on('chat:message', function (msg) {
         var i, sel, token, tokenName, charId;
         var hdRaw, bonusRaw;
         var acValue, moveValue;
         var parsedHD, rolled, moraleValue;
+        var noAppearingValue, lairValue, rolledAppearing, rolledLair;
         var updateObj;
         var errors = [];
+        var successes = [];
 
         if (msg.type !== 'api') return;
         if (!msg.content) return;
         if (String(msg.content).trim().toLowerCase() !== COMMAND) return;
 
         if (!msg.selected || !msg.selected.length) {
-            whisperGM('No tokens selected.');
+            whisperGM('<div style="padding:8px;border:1px solid #900;background:#220000;color:#fff;border-radius:6px;">No tokens selected.</div>');
             return;
         }
 
@@ -284,6 +346,12 @@ on('ready', function () {
 
             acValue = chooseACValue(charId, token);
             moveValue = chooseMoveValue(charId, token);
+
+            noAppearingValue = getAttrByName(charId, 'no_appearing') || getAttrByName(charId, 'number_appearing');
+            lairValue = getAttrByName(charId, 'lair') || getAttrByName(charId, 'percent_in_lair');
+
+            rolledAppearing = rollSimpleRange(noAppearingValue);
+            rolledLair = rollLairChance(lairValue);
 
             parsedHD = parseMonsterHD(hdRaw, bonusRaw);
 
@@ -319,10 +387,35 @@ on('ready', function () {
             }
 
             token.set(updateObj);
+
+            successes.push(
+                '<b>' + escapeHtml(tokenName) + '</b>: ' +
+                escapeHtml(parsedHD.label) + ' → HP <b>' + escapeHtml(rolled.total) + '</b>' +
+                (hasText(acValue) ? ', AC ' + escapeHtml(acValue) : '') +
+                (hasText(moveValue) ? ', MV ' + escapeHtml(moveValue) : '') +
+                (rolledAppearing ? ', No. Appearing ' + escapeHtml(rolledAppearing.label) + ' → <b>' + escapeHtml(rolledAppearing.rolled) + '</b>' : '') +
+                (rolledLair ? ', In Lair ' + escapeHtml(rolledLair.label) + ' → <b>' + escapeHtml(rolledLair.rolled) + '</b> (' + escapeHtml(rolledLair.isInLair ? 'Yes' : 'No') + ')' : '') +
+                ', Morale ' + escapeHtml(moraleValue) + '%'
+            );
+        }
+
+        if (successes.length) {
+            whisperGM(
+                '<div style="padding:8px;border:1px solid #264b1f;background:#10240d;color:#fff;border-radius:6px;">' +
+                '<b>HD Updated</b><br>' +
+                '<span style="color:#bbb;">HP • AC • movement • No. Appearing • In Lair • morale</span><br>' +
+                successes.join('<br>') +
+                '</div>'
+            );
         }
 
         if (errors.length) {
-            whisperGM('<b>Errors</b><br>' + errors.join('<br>'));
+            whisperGM(
+                '<div style="padding:8px;border:1px solid #900;background:#220000;color:#fff;border-radius:6px;">' +
+                '<b>HD Errors</b><br>' +
+                errors.join('<br>') +
+                '</div>'
+            );
         }
     });
 
